@@ -9,6 +9,7 @@ import db
 import economy
 import group
 import mafia
+import welcome
 import solo
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO)
@@ -44,7 +45,7 @@ def main():
         .post_init(post_init)
         .build()
     )
-    for mod in (economy, solo, group, mafia):
+    for mod in (economy, solo, group, mafia, welcome):
         for h in mod.handlers():
             app.add_handler(h)
     economy.schedule(app)
