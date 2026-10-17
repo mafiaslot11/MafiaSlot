@@ -12,15 +12,29 @@ NOT_ENOUGH = "❌ coin မလောက်ပါ (လက်ကျန် {})"
 
 
 # ======================= SLOT =======================
-def slot_mult(v):
-    """Telegram 🎰 dice value 1-64. 64=777, 1/22/43 = other triples."""
-    if v == 64:
-        return 10
-    if v in (1, 22, 43):
-        return 5
-    n = v - 1
-    reels = [n % 4, (n // 4) % 4, n // 16]
-    return 1 if len(set(reels)) < 3 else 0  # two alike = bet back
+SLOT_SYMS = ["🍒", "🍋", "🔔", "⭐", "7️⃣", "💎"]
+SLOT_TRIPLE_CHANCE = 0.06   # 3 alike  -> x2
+SLOT_PAIR_CHANCE = 0.34     # 2 alike  -> x1.5   (total win chance = 40%; no draws: win or lose only)
+SLOT_TRIPLE_MULT = 2
+SLOT_PAIR_MULT = 1.5
+
+
+def slot_spin():
+    """Returns (3 reels, multiplier). Win chance is exactly 40%. Never a draw."""
+    r = random.random()
+    if r < SLOT_TRIPLE_CHANCE:
+        return [random.choice(SLOT_SYMS)] * 3, SLOT_TRIPLE_MULT
+    if r < SLOT_TRIPLE_CHANCE + SLOT_PAIR_CHANCE:
+        a, b = random.sample(SLOT_SYMS, 2)
+        reels = [a, a, b]
+        random.shuffle(reels)
+        return reels, SLOT_PAIR_MULT
+    return random.sample(SLOT_SYMS, 3), 0
+
+
+def slot_view(reels, shown):
+    cells = [reels[i] if i < shown else "❓" for i in range(3)]
+    return "🎰 <b>Slot</b>\n\n[ " + " | ".join(cells) + " ]"
 
 
 async def slot_cmd(update, context):
@@ -35,21 +49,23 @@ async def slot_cmd(update, context):
         return
     settled = False
     try:
-        d = await m.reply_dice(emoji="🎰")
-        v = d.dice.value
-        await asyncio.sleep(3)
-        mult = slot_mult(v)
+        reels, mult = slot_spin()
+        msg = await m.reply_text(slot_view(reels, 0))
+        for k in (1, 2, 3):
+            await asyncio.sleep(1)
+            await edit_msg(context.bot, m.chat_id, msg.message_id, slot_view(reels, k))
         pay = int(amt * mult)
         settled = db.settle([hid], {u.id: pay}, "slot")
         if not settled:
             return
-        if mult >= 5:
-            t = f"🎉 JACKPOT x{mult}! +{fmt(pay - amt)} coin"
-        elif mult == 1:
-            t = "🤝 ၂ ခုတူ — လောင်းကြေး ပြန်ရပါပြီ"
+        if mult == SLOT_TRIPLE_MULT:
+            t = f"🎉 ၃ ခုလုံးတူ! ×{mult} +{fmt(pay - amt)} coin"
+        elif mult:
+            t = f"🎉 ၂ ခုတူ! ×{mult} +{fmt(pay - amt)} coin"
         else:
-            t = f"😢 ရှုံးပါပြီ -{fmt(amt)}"
-        await m.reply_text(f"{t}\n💰 လက်ကျန်: {fmt(db.balance(u.id))}")
+            t = f"😢 မတူလို့ ရှုံးပါပြီ -{fmt(amt)} coin"
+        await edit_msg(context.bot, m.chat_id, msg.message_id,
+                       slot_view(reels, 3) + f"\n\n{t}\n💰 လက်ကျန်: {fmt(db.balance(u.id))}")
     except Exception:
         log.exception("slot")
         if not settled and db.refund_hold(hid):

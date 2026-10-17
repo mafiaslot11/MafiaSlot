@@ -51,6 +51,14 @@ HELP = (
 )
 
 
+def start_text(u):
+    who = f"@{u.username}" if u.username else mention(u.id, u.full_name)
+    now = datetime.now(MMT)
+    head = (f"👋 <b>ကြိုဆိုပါတယ်</b> {who}\n"
+            f"🕒 ဝင်လာချိန်: {now:%d/%m/%Y %I:%M %p} (မြန်မာစံတော်ချိန်)\n\n")
+    return head + START_TEXT
+
+
 def start_markup():
     rows = []
     if GROUP_LINK:
@@ -86,11 +94,11 @@ async def start(update, context):
         log.info("no profile photo for %s", u.id)
     if photo:
         try:
-            await m.reply_photo(photo, caption=START_TEXT, reply_markup=markup)
+            await m.reply_photo(photo, caption=start_text(u), reply_markup=markup)
             return
         except Exception:
             log.exception("start photo failed")
-    await m.reply_text(START_TEXT, reply_markup=markup)
+    await m.reply_text(start_text(u), reply_markup=markup)
 
 
 async def help_cb(update, context):

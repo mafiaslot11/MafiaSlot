@@ -224,6 +224,15 @@ async def gm_cb(update, context):
 SIC = {}
 SIC_BET, SIC_WIN, SIC_MAX, SIC_SECS = 3000, 2, 30, 30
 SIC_LABEL = {"big": "အကြီး", "small": "အသေး", "triple": "နံပါတ်တူ"}
+KEYCAP = {1: "1️⃣", 2: "2️⃣", 3: "3️⃣", 4: "4️⃣", 5: "5️⃣", 6: "6️⃣"}
+
+
+def sic_frame(vals, title, shown=3, total=False):
+    cells = [KEYCAP[vals[i]] if i < shown else "❓" for i in range(3)]
+    t = f"🎲 <b>Sic Bo</b> — {title}\n\n<b>[  " + "  |  ".join(cells) + "  ]</b>"
+    if total:
+        t += f"\n\nစုစုပေါင်း = <b>{sum(vals)}</b>"
+    return t
 
 
 async def sic_cmd(update, context):
@@ -279,12 +288,17 @@ async def sic_close(context):
         return
     settled = False
     try:
-        await edit_msg(context.bot, chat, g["mid"], f"🎲 <b>Sic Bo</b> — လောင်းချိန်ပြီး ({len(bets)} ယောက်) အံစာပစ်နေပါပြီ...")
-        vals = []
-        for _ in range(3):
-            d = await context.bot.send_dice(chat, emoji="🎲")
-            vals.append(d.dice.value)
-        await asyncio.sleep(4)
+        vals = [random.randint(1, 6) for _ in range(3)]
+        mid = g["mid"]
+        await edit_msg(context.bot, chat, mid, f"🎲 <b>Sic Bo</b> — လောင်းချိန်ပြီး ({len(bets)} ယောက်)\nအံစာလှိမ့်နေပါပြီ...")
+        await asyncio.sleep(1.2)
+        for _ in range(3):  # rolling effect
+            fake = [random.randint(1, 6) for _ in range(3)]
+            await edit_msg(context.bot, chat, mid, sic_frame(fake, "လှိမ့်နေတယ်..."))
+            await asyncio.sleep(0.9)
+        for k in (1, 2, 3):  # reveal one die at a time
+            await edit_msg(context.bot, chat, mid, sic_frame(vals, "ပွင့်နေပြီ...", shown=k))
+            await asyncio.sleep(1.1)
         total = sum(vals)
         triple = len(set(vals)) == 1
         outcome = "triple" if triple else ("big" if total >= 11 else "small")
@@ -296,7 +310,8 @@ async def sic_close(context):
         settled = db.settle([b[1] for b in bets.values()], payouts, "sic")
         if not settled:
             return
-        res = f"{' + '.join(map(str, vals))} = <b>{total}</b> → <b>{SIC_LABEL[outcome]}</b>"
+        await edit_msg(context.bot, chat, mid, sic_frame(vals, "ရလဒ်", total=True))
+        res = f"{' + '.join(KEYCAP[v] for v in vals)} = <b>{total}</b> → <b>{SIC_LABEL[outcome]}</b>"
         w = ("🎉 နိုင်သူ: " + ", ".join(winners) + f"\n(+{fmt(SIC_BET * (SIC_WIN - 1))} စီ)") if winners else "😢 ဘယ်သူမှ မနိုင်ပါ"
         await context.bot.send_message(chat, f"🎲 <b>Sic Bo ရလဒ်</b>\n{res}\n\n{w}")
     except Exception:
@@ -311,7 +326,7 @@ async def sic_close(context):
 
 # ======================= BINGO =======================
 BG = {}
-BINGO_ENTRY, BINGO_MAX, BINGO_LOBBY, BINGO_DELAY = 10000, 30, 60, 3.5
+BINGO_ENTRY, BINGO_MAX, BINGO_LOBBY, BINGO_DELAY = 10000, 30, 600, 3.5  # lobby 600s = safety timeout only
 
 
 def has_line(card, called):
@@ -330,15 +345,16 @@ def bingo_lobby_text(g):
     names = "\n".join(f"• {esc(p['name'])}" for p in g["players"].values())
     return (f"🎱 <b>BINGO</b>\nဝင်ကြေး {fmt(BINGO_ENTRY)} | အနည်းဆုံး ၂ ယောက်\n"
             f"တန်း (ဘေး/ဒေါင်/ထောင့်ဖြတ်) အရင်ပြည့်သူ pot အကုန်ရ\n"
-            f"⏳ {BINGO_LOBBY} စက္ကန့်အတွင်း Join နှိပ်ပါ\n\nပါဝင်သူ ({len(g['players'])}):\n{names}")
+            f"👉 Join နှိပ်ပါ။ ပွဲစသူက <b>Start</b> နှိပ်ရင် ချက်ချင်းစမယ်\n\nပါဝင်သူ ({len(g['players'])}):\n{names}")
 
 
 def bingo_kb(gid, lobby):
-    row = []
+    rows = []
     if lobby:
-        row.append(btn(f"Join ({fmt(BINGO_ENTRY)})", f"bg:{gid}:join", "green"))
-    row.append(btn("ကဒ်ကြည့်မယ်", f"bg:{gid}:card", "green"))
-    return kb([row])
+        rows.append([btn(f"Join ({fmt(BINGO_ENTRY)})", f"bg:{gid}:join", "green"),
+                     btn("Start", f"bg:{gid}:start", "green")])
+    rows.append([btn("ကဒ်ကြည့်မယ်", f"bg:{gid}:card", "green")])
+    return kb(rows)
 
 
 def bingo_cleanup(g):
@@ -360,7 +376,7 @@ async def bingo_cmd(update, context):
         await m.reply_text(f"❌ ဝင်ကြေး {fmt(BINGO_ENTRY)} မရှိပါ (လက်ကျန် {fmt(db.balance(u.id))})")
         return
     gid = new_id()
-    g = {"id": gid, "chat": m.chat_id, "stage": "lobby", "called": set(),
+    g = {"id": gid, "chat": m.chat_id, "host": u.id, "stage": "lobby", "called": set(),
          "players": {u.id: {"name": u.full_name, "hid": hid, "card": _new_card()}}}
     BG[m.chat_id] = g
     msg = await m.reply_text(bingo_lobby_text(g), reply_markup=bingo_kb(gid, True))
@@ -373,17 +389,25 @@ def _new_card():
     return [nums[i * 5:(i + 1) * 5] for i in range(5)]
 
 
+async def bingo_begin(context, g):
+    if g["stage"] != "lobby":
+        return
+    clear_timer(context, "bgl" + g["id"])
+    g["stage"] = "play"
+    await edit_msg(context.bot, g["chat"], g["mid"],
+                   f"🎱 <b>BINGO စပါပြီ!</b> Pot {fmt(len(g['players']) * BINGO_ENTRY)}\nနံပါတ်တွေ စခေါ်မယ်...",
+                   bingo_kb(g["id"], False))
+    g["task"] = asyncio.create_task(bingo_run(context.bot, g))
+
+
 async def bingo_lobby_end(context):
+    """Safety timeout: nobody pressed Start for a long time -> cancel and refund."""
     g = BG.get(context.job.data)
     if not g or g["stage"] != "lobby":
         return
-    if len(g["players"]) < 2:
-        refund_holds([p["hid"] for p in g["players"].values()])
-        bingo_cleanup(g)
-        await edit_msg(context.bot, g["chat"], g["mid"], "🎱 Bingo — လူမလောက်လို့ ပယ်ဖျက်ပါပြီ (coin ပြန်ပေးပြီး)")
-        return
-    g["stage"] = "play"
-    g["task"] = asyncio.create_task(bingo_run(context.bot, g))
+    refund_holds([p["hid"] for p in g["players"].values()])
+    bingo_cleanup(g)
+    await edit_msg(context.bot, g["chat"], g["mid"], "🎱 Bingo — မစတာကြာလို့ ပယ်ဖျက်ပါပြီ (coin ပြန်ပေးပြီး)")
 
 
 async def bingo_run(bot, g):
@@ -436,6 +460,17 @@ async def bingo_cb(update, context):
             await q.answer("သင် ပါဝင်မထားပါ", show_alert=True)
         else:
             await q.answer(card_text(p["card"], g["called"]), show_alert=True)
+        return
+    if act == "start":
+        if u.id != g["host"]:
+            await q.answer("ပွဲစသူပဲ Start နှိပ်လို့ရပါတယ်", show_alert=True)
+        elif g["stage"] != "lobby":
+            await q.answer()
+        elif len(g["players"]) < 2:
+            await q.answer("အနည်းဆုံး ၂ ယောက် လိုပါတယ်", show_alert=True)
+        else:
+            await q.answer()
+            await bingo_begin(context, g)
         return
     if g["stage"] != "lobby":
         await q.answer("ပွဲစပြီးပါပြီ", show_alert=True)
