@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS bets(
   number INTEGER, amount INTEGER, settled INTEGER DEFAULT 0,
   UNIQUE(draw, uid));
 CREATE TABLE IF NOT EXISTS draws(draw TEXT PRIMARY KEY, number INTEGER);
+CREATE TABLE IF NOT EXISTS claims(uid INTEGER, kind TEXT, ts INTEGER, PRIMARY KEY(uid, kind));
 """
 )
 
@@ -253,3 +254,15 @@ def settle_draw(draw):
                 winners.append((b["uid"], prize))
             c.execute("UPDATE bets SET settled=1 WHERE id=?", (b["id"],))
         return num, winners, chats
+
+
+# ---------- one-time bonus ----------
+def claim_once(uid, kind, amount):
+    """Give `amount` coin once per (user, kind). Returns True only the first time."""
+    with tx() as c:
+        if c.execute("SELECT 1 FROM claims WHERE uid=? AND kind=?", (uid, kind)).fetchone():
+            return False
+        c.execute("INSERT INTO claims(uid,kind,ts) VALUES(?,?,?)", (uid, kind, int(time.time())))
+        c.execute("UPDATE users SET coin=coin+? WHERE id=?", (amount, uid))
+        _log(c, uid, amount, f"bonus:{kind}")
+        return True

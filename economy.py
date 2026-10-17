@@ -3,22 +3,65 @@ from zoneinfo import ZoneInfo
 
 from telegram.ext import CallbackQueryHandler, CommandHandler
 
+import os
+
 import db
 from common import (BET_MAX, BET_MIN, OWNER_ID, btn, edit_msg, ensure, esc, fmt, kb,
-                    log, mention, new_id, parse_amount)
+                    log, mention, new_id, parse_amount, url_btn)
 
 MMT = ZoneInfo("Asia/Yangon")
 DRAW_HOURS = (12, 18)
 
-HELP = (
-    "🎮 <b>Game Bot</b>\n\n"
-    "💰 /coin – လက်ကျန်ကြည့်\n"
-    "🎁 /give ပမာဏ – သူများစာကို reply ထောက်ပြီး coin ပေး\n"
-    "🏆 /top – coin အများဆုံး ၁၀ ယောက်\n\n"
-    "🃏 /bj ပမာဏ\n🎰 /slot ပမာဏ\n💣 /mine ပမာဏ\n"
-    "💥 /gmine – group mine\n🎲 /sic – Sic Bo\n🎱 /bingo\n🔪 /mafia\n"
-    "🎟 /lottery နံပါတ် ပမာဏ – နေ့စဉ်ထီ"
+GROUP_LINK = os.getenv("GROUP_LINK", "")          # e.g. https://t.me/yourgroup
+OWNER_USERNAME = os.getenv("OWNER_USERNAME", "")   # e.g. yourname (without @)
+GROUP_ID = os.getenv("GROUP_ID", "")               # e.g. -1001234567890 (bot must be admin there)
+GROUP_BONUS = 300000
+
+START_TEXT = (
+    "<b>🎮 Game Bot\n"
+    "Coin အသုံးပြုပြီးကြိုက်နှစ်သက်ရာ Game ကိုရွေးဆော့လို့ရပါတယ်\n\n"
+    "Game List</b>\n\n"
+    "<blockquote>Blackjack🃏\n"
+    "Slot🎰\n"
+    "Mine💣\n"
+    "Groupmine🔥\n"
+    "Triple Dice🎲\n"
+    "Bingo🎱\n"
+    "Mafia🕵️\n"
+    "Lottery🏆</blockquote>\n"
+    "<blockquote>Game Group join ပြီး Bonus Coin 300000 ယူပါ</blockquote>\n\n"
+    "<i>ဆော့နည်းကို အောက်က Help Button ကိုနှိပ်ကြည့်ပါ 👇👇👇👇</i>"
 )
+
+HELP = (
+    "📖 <b>ဆော့နည်း</b>\n\n"
+    "💰 /coin – လက်ကျန်ကြည့်\n"
+    "🎁 /give ပမာဏ – ပေးချင်သူရဲ့စာကို reply ထောက်ပြီး ရိုက်\n"
+    "🏆 /top – coin အများဆုံး ၁၀ ယောက်\n"
+    "🎁 /bonus – Game Group join ပြီးရင် Bonus coin 300,000 ယူ (တစ်ကြိမ်ပဲ)\n\n"
+    "🃏 <b>/bj ပမာဏ</b> – 21 နီးအောင်ယူ၊ Dealer ကိုနိုင်ရင် ×၂\n"
+    "🎰 <b>/slot ပမာဏ</b> – ၂ ခုတူ ×1.5၊ ၃ ခုလုံးတူ ×၂\n"
+    "💣 <b>/mine ပမာဏ</b> – ကွက်ဖွင့်၊ မိုင်းမနင်းမိရင် Cash out\n"
+    "🔥 <b>/gmine</b> – ဝင်ကြေး 10,000၊ နောက်ဆုံးကျန်သူ အကုန်ရ\n"
+    "🎲 <b>/sic</b> – အကြီး/အသေး/နံပါတ်တူ၊ 3,000 ပုံသေ၊ မှန်ရင် ×၂\n"
+    "😆 <b>/bingo</b> – ဝင်ကြေး 10,000၊ တန်းအရင်ပြည့်သူ pot အကုန်ရ\n"
+    "♥️ <b>/mafia</b> – ဝင်ကြေး 10,000၊ ၄–၂၀ ယောက်၊ နိုင်တဲ့အဖွဲ့ pot ခွဲယူ\n"
+    "🏆 <b>/lottery နံပါတ် ပမာဏ</b> – 000–999၊ မှန်ရင် ×၁၀၊ ၁၂:၀၀ နဲ့ ၁၈:၀၀ ထီဖွင့်\n\n"
+    f"Bet: {BET_MIN:,} ကနေ {BET_MAX:,} (bj / slot / mine / lottery)"
+)
+
+
+def start_markup():
+    rows = []
+    if GROUP_LINK:
+        rows.append([url_btn("🎮 Game Group Join", GROUP_LINK)])
+    if GROUP_ID:
+        rows.append([btn("🎁 Bonus ယူမယ်", "bonus", "green", emoji=False)])
+    row = [btn("📖 Help", "help", "blue", emoji=False)]
+    if OWNER_USERNAME:
+        row.append(url_btn("👑 Owner", "https://t.me/" + OWNER_USERNAME.lstrip("@")))
+    rows.append(row)
+    return kb(rows)
 
 
 def owner_only(fn):
@@ -31,8 +74,63 @@ def owner_only(fn):
 
 
 async def start(update, context):
-    await ensure(update)
-    await update.message.reply_text(HELP)
+    u = await ensure(update)
+    m = update.message
+    markup = start_markup()
+    photo = None
+    try:
+        ph = await context.bot.get_user_profile_photos(u.id, limit=1)
+        if ph.total_count:
+            photo = ph.photos[0][-1].file_id
+    except Exception:
+        log.info("no profile photo for %s", u.id)
+    if photo:
+        try:
+            await m.reply_photo(photo, caption=START_TEXT, reply_markup=markup)
+            return
+        except Exception:
+            log.exception("start photo failed")
+    await m.reply_text(START_TEXT, reply_markup=markup)
+
+
+async def help_cb(update, context):
+    q = update.callback_query
+    await q.answer()
+    await context.bot.send_message(q.message.chat_id, HELP)
+
+
+async def _bonus(context, u):
+    """Returns the message to show. Pays once, only if the user is in the Game Group."""
+    if not GROUP_ID:
+        return "⚠️ Bonus ကို မသတ်မှတ်ရသေးပါ"
+    try:
+        member = await context.bot.get_chat_member(int(GROUP_ID), u.id)
+    except Exception:
+        log.exception("bonus: membership check failed")
+        return "⚠️ စစ်လို့မရပါ၊ ခဏနေမှ ပြန်စမ်းပါ"
+    in_group = member.status in ("member", "administrator", "creator") or (
+        member.status == "restricted" and getattr(member, "is_member", False))
+    if not in_group:
+        return "❌ Game Group ကို အရင် join ပါ၊ ပြီးမှ ပြန်နှိပ်ပါ"
+    db.ensure_user(u.id, u.full_name, u.username)
+    if db.claim_once(u.id, "group_bonus", GROUP_BONUS):
+        return f"🎉 Bonus {fmt(GROUP_BONUS)} coin ရပါပြီ!\n💰 လက်ကျန်: {fmt(db.balance(u.id))}"
+    return "✅ Bonus ကို ယူပြီးသားပါ"
+
+
+async def bonus_cmd(update, context):
+    u = await ensure(update, notify=False)
+    await update.message.reply_text(await _bonus(context, u))
+
+
+async def bonus_cb(update, context):
+    q = update.callback_query
+    await q.answer(await _bonus(context, q.from_user), show_alert=True)
+
+
+@owner_only
+async def id_cmd(update, context):
+    await update.message.reply_text(f"Chat ID: <code>{update.effective_chat.id}</code>")
 
 
 async def coin_cmd(update, context):
@@ -261,6 +359,8 @@ def handlers():
     return [
         CommandHandler("start", start),
         CommandHandler("coin", coin_cmd),
+        CommandHandler("bonus", bonus_cmd),
+        CommandHandler("id", id_cmd),
         CommandHandler("give", give_cmd),
         CommandHandler("top", top_cmd),
         CommandHandler("addcoin", addcoin),
@@ -270,4 +370,6 @@ def handlers():
         CommandHandler("giveaway", giveaway),
         CommandHandler("lottery", lottery_cmd),
         CallbackQueryHandler(giveaway_cb, pattern=r"^gd:"),
+        CallbackQueryHandler(help_cb, pattern=r"^help$"),
+        CallbackQueryHandler(bonus_cb, pattern=r"^bonus$"),
     ]
