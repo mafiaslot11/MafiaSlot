@@ -27,6 +27,10 @@ def btn(text, data, color=None, emoji=True):
     return InlineKeyboardButton(label, callback_data=data, api_kwargs={"style": style})
 
 
+def url_btn(text, url):
+    return InlineKeyboardButton(text, url=url)
+
+
 def kb(rows):
     return InlineKeyboardMarkup(rows)
 
