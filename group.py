@@ -227,12 +227,9 @@ SIC_LABEL = {"big": "အကြီး", "small": "အသေး", "triple": "န�
 KEYCAP = {1: "1️⃣", 2: "2️⃣", 3: "3️⃣", 4: "4️⃣", 5: "5️⃣", 6: "6️⃣"}
 
 
-def sic_frame(vals, title, shown=3, total=False):
+def sic_frame(vals, shown):
     cells = [KEYCAP[vals[i]] if i < shown else "❓" for i in range(3)]
-    t = f"🎲 <b>Sic Bo</b> — {title}\n\n<b>[  " + "  |  ".join(cells) + "  ]</b>"
-    if total:
-        t += f"\n\nစုစုပေါင်း = <b>{sum(vals)}</b>"
-    return t
+    return "🎲 <b>Sic Bo</b>\n\n[ " + " | ".join(cells) + " ]"
 
 
 async def sic_cmd(update, context):
@@ -290,15 +287,10 @@ async def sic_close(context):
     try:
         vals = [random.randint(1, 6) for _ in range(3)]
         mid = g["mid"]
-        await edit_msg(context.bot, chat, mid, f"🎲 <b>Sic Bo</b> — လောင်းချိန်ပြီး ({len(bets)} ယောက်)\nအံစာလှိမ့်နေပါပြီ...")
-        await asyncio.sleep(1.2)
-        for _ in range(3):  # rolling effect
-            fake = [random.randint(1, 6) for _ in range(3)]
-            await edit_msg(context.bot, chat, mid, sic_frame(fake, "လှိမ့်နေတယ်..."))
-            await asyncio.sleep(0.9)
-        for k in (1, 2, 3):  # reveal one die at a time
-            await edit_msg(context.bot, chat, mid, sic_frame(vals, "ပွင့်နေပြီ...", shown=k))
-            await asyncio.sleep(1.1)
+        await edit_msg(context.bot, chat, mid, sic_frame(vals, 0))
+        for k in (1, 2, 3):  # reveal one die per second
+            await asyncio.sleep(1)
+            await edit_msg(context.bot, chat, mid, sic_frame(vals, k))
         total = sum(vals)
         triple = len(set(vals)) == 1
         outcome = "triple" if triple else ("big" if total >= 11 else "small")
@@ -310,10 +302,9 @@ async def sic_close(context):
         settled = db.settle([b[1] for b in bets.values()], payouts, "sic")
         if not settled:
             return
-        await edit_msg(context.bot, chat, mid, sic_frame(vals, "ရလဒ်", total=True))
-        res = f"{' + '.join(KEYCAP[v] for v in vals)} = <b>{total}</b> → <b>{SIC_LABEL[outcome]}</b>"
         w = ("🎉 နိုင်သူ: " + ", ".join(winners) + f"\n(+{fmt(SIC_BET * (SIC_WIN - 1))} စီ)") if winners else "😢 ဘယ်သူမှ မနိုင်ပါ"
-        await context.bot.send_message(chat, f"🎲 <b>Sic Bo ရလဒ်</b>\n{res}\n\n{w}")
+        await edit_msg(context.bot, chat, mid,
+                       sic_frame(vals, 3) + f"\nစုစုပေါင်း = <b>{total}</b> → <b>{SIC_LABEL[outcome]}</b>\n\n{w}")
     except Exception:
         log.exception("sic")
         if not settled:

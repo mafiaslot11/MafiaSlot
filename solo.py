@@ -12,29 +12,25 @@ NOT_ENOUGH = "❌ coin မလောက်ပါ (လက်ကျန် {})"
 
 
 # ======================= SLOT =======================
-SLOT_SYMS = ["🍒", "🍋", "🔔", "⭐", "7️⃣", "💎"]
-SLOT_TRIPLE_CHANCE = 0.06   # 3 alike  -> x2
-SLOT_PAIR_CHANCE = 0.34     # 2 alike  -> x1.5   (total win chance = 40%; no draws: win or lose only)
-SLOT_TRIPLE_MULT = 2
-SLOT_PAIR_MULT = 1.5
+# Uses Telegram's own animated 🎰. Telegram picks the dice value itself (about 62% of
+# values have 2+ alike), so to get EXACTLY the win chance we want, the bot decides
+# win/lose first and re-sends the dice until the value matches (non-matching dice
+# are deleted immediately).
+SLOT_WIN_CHANCE = 0.40      # chance to win (2 or 3 alike). Never a draw.
+SLOT_PAIR_MULT = 1.5        # 2 alike
+SLOT_TRIPLE_MULT = 2        # 3 alike
+SLOT_MAX_TRIES = 20
 
 
-def slot_spin():
-    """Returns (3 reels, multiplier). Win chance is exactly 40%. Never a draw."""
-    r = random.random()
-    if r < SLOT_TRIPLE_CHANCE:
-        return [random.choice(SLOT_SYMS)] * 3, SLOT_TRIPLE_MULT
-    if r < SLOT_TRIPLE_CHANCE + SLOT_PAIR_CHANCE:
-        a, b = random.sample(SLOT_SYMS, 2)
-        reels = [a, a, b]
-        random.shuffle(reels)
-        return reels, SLOT_PAIR_MULT
-    return random.sample(SLOT_SYMS, 3), 0
-
-
-def slot_view(reels, shown):
-    cells = [reels[i] if i < shown else "❓" for i in range(3)]
-    return "🎰 <b>Slot</b>\n\n[ " + " | ".join(cells) + " ]"
+def slot_mult(v):
+    """Telegram 🎰 value 1-64 -> payout multiplier (0 = lose)."""
+    n = v - 1
+    distinct = len({n % 4, (n // 4) % 4, n // 16})
+    if distinct == 1:
+        return SLOT_TRIPLE_MULT
+    if distinct == 2:
+        return SLOT_PAIR_MULT
+    return 0
 
 
 async def slot_cmd(update, context):
@@ -49,11 +45,24 @@ async def slot_cmd(update, context):
         return
     settled = False
     try:
-        reels, mult = slot_spin()
-        msg = await m.reply_text(slot_view(reels, 0))
-        for k in (1, 2, 3):
-            await asyncio.sleep(1)
-            await edit_msg(context.bot, m.chat_id, msg.message_id, slot_view(reels, k))
+        want_win = random.random() < SLOT_WIN_CHANCE
+        dice = None
+        for _ in range(SLOT_MAX_TRIES):
+            d = await m.reply_dice(emoji="🎰")
+            if (slot_mult(d.dice.value) > 0) == want_win:
+                dice = d
+                break
+            try:
+                await d.delete()
+            except Exception:
+                pass
+        if dice is None:  # extremely unlikely
+            db.refund_hold(hid)
+            settled = True
+            await m.reply_text("⚠️ ပြန်စမ်းပါ၊ coin ပြန်ပေးပြီးပါပြီ")
+            return
+        mult = slot_mult(dice.dice.value)
+        await asyncio.sleep(3)
         pay = int(amt * mult)
         settled = db.settle([hid], {u.id: pay}, "slot")
         if not settled:
@@ -64,8 +73,7 @@ async def slot_cmd(update, context):
             t = f"🎉 ၂ ခုတူ! ×{mult} +{fmt(pay - amt)} coin"
         else:
             t = f"😢 မတူလို့ ရှုံးပါပြီ -{fmt(amt)} coin"
-        await edit_msg(context.bot, m.chat_id, msg.message_id,
-                       slot_view(reels, 3) + f"\n\n{t}\n💰 လက်ကျန်: {fmt(db.balance(u.id))}")
+        await m.reply_text(f"{t}\n💰 လက်ကျန်: {fmt(db.balance(u.id))}")
     except Exception:
         log.exception("slot")
         if not settled and db.refund_hold(hid):
