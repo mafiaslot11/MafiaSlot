@@ -12,14 +12,10 @@ NOT_ENOUGH = "❌ coin မလောက်ပါ (လက်ကျန် {})"
 
 
 # ======================= SLOT =======================
-# Uses Telegram's own animated 🎰. Telegram picks the dice value itself (about 62% of
-# values have 2+ alike), so to get EXACTLY the win chance we want, the bot decides
-# win/lose first and re-sends the dice until the value matches (non-matching dice
-# are deleted immediately).
-SLOT_WIN_CHANCE = 0.40      # chance to win (2 or 3 alike). Never a draw.
-SLOT_PAIR_MULT = 1.5        # 2 alike
-SLOT_TRIPLE_MULT = 2        # 3 alike
-SLOT_MAX_TRIES = 20
+# Telegram's own animated 🎰. The result is whatever the dice shows:
+#   2 symbols alike -> win (x1.5) | 3 alike -> win (x2) | all different -> lose. No draws.
+SLOT_PAIR_MULT = 1.5
+SLOT_TRIPLE_MULT = 2
 
 
 def slot_mult(v):
@@ -45,24 +41,9 @@ async def slot_cmd(update, context):
         return
     settled = False
     try:
-        want_win = random.random() < SLOT_WIN_CHANCE
-        dice = None
-        for _ in range(SLOT_MAX_TRIES):
-            d = await m.reply_dice(emoji="🎰")
-            if (slot_mult(d.dice.value) > 0) == want_win:
-                dice = d
-                break
-            try:
-                await d.delete()
-            except Exception:
-                pass
-        if dice is None:  # extremely unlikely
-            db.refund_hold(hid)
-            settled = True
-            await m.reply_text("⚠️ ပြန်စမ်းပါ၊ coin ပြန်ပေးပြီးပါပြီ")
-            return
-        mult = slot_mult(dice.dice.value)
-        await asyncio.sleep(3)
+        d = await m.reply_dice(emoji="🎰")
+        mult = slot_mult(d.dice.value)
+        await asyncio.sleep(3)  # let the animation finish
         pay = int(amt * mult)
         settled = db.settle([hid], {u.id: pay}, "slot")
         if not settled:
