@@ -7,6 +7,8 @@ from telegram.ext import Application, Defaults
 
 import db
 import economy
+import fortune
+import fortune_core
 import group
 import mafia
 import welcome
@@ -17,6 +19,11 @@ log = logging.getLogger("bot")
 
 
 async def post_init(app):
+    try:
+        n = fortune_core.load_content()
+        log.info("fortune: %s readings ready", n)
+    except Exception:
+        log.exception("fortune content could not be loaded; the feature stays hidden")
     # Bot just (re)started: every unfinished game's bet is refunded.
     for uid, amount, game in db.refund_holds():
         log.info("refunded %s coin to %s (%s)", amount, uid, game)
@@ -45,7 +52,7 @@ def main():
         .post_init(post_init)
         .build()
     )
-    for mod in (economy, solo, group, mafia, welcome):
+    for mod in (economy, solo, group, mafia, welcome, fortune):
         for h in mod.handlers():
             app.add_handler(h)
     economy.schedule(app)
