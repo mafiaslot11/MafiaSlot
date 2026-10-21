@@ -7,8 +7,6 @@ from telegram.ext import Application, Defaults
 
 import db
 import economy
-import fortune
-import fortune_core
 import group
 import mafia
 import welcome
@@ -18,12 +16,29 @@ logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s", le
 log = logging.getLogger("bot")
 
 
-async def post_init(app):
+def remove_fortune_data():
+    """One-time cleanup: delete the fortune tables (readings, users' saved birth dates and
+    history) and shrink the database file. Safe to run on every start."""
+    names = ["fx_readings", "fx_compat", "fx_questions", "fx_meta", "fx_history",
+             "fx_period", "fx_state", "fx_profile"]
     try:
-        n = fortune_core.load_content()
-        log.info("fortune: %s readings ready", n)
+        with db._lock:
+            have = [r[0] for r in db._c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'fx\\_%' ESCAPE '\\'")]
+        if not have:
+            return
+        with db.tx() as c:
+            for n in names:
+                c.execute(f"DROP TABLE IF EXISTS {n}")
+        with db._lock:
+            db._c.execute("VACUUM")
+            db._c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        log.info("fortune data removed (%s tables)", len(have))
     except Exception:
-        log.exception("fortune content could not be loaded; the feature stays hidden")
+        log.exception("fortune cleanup failed (harmless, the bot keeps running)")
+
+
+async def post_init(app):
+    remove_fortune_data()
     # Bot just (re)started: every unfinished game's bet is refunded.
     for uid, amount, game in db.refund_holds():
         log.info("refunded %s coin to %s (%s)", amount, uid, game)
@@ -52,7 +67,7 @@ def main():
         .post_init(post_init)
         .build()
     )
-    for mod in (economy, solo, group, mafia, welcome, fortune):
+    for mod in (economy, solo, group, mafia, welcome):
         for h in mod.handlers():
             app.add_handler(h)
     economy.schedule(app)

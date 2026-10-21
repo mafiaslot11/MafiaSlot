@@ -69,12 +69,6 @@ def start_markup():
     if OWNER_USERNAME:
         row.append(url_btn("👑 Owner", "https://t.me/" + OWNER_USERNAME.lstrip("@")))
     rows.append(row)
-    try:
-        import fortune_core
-        if fortune_core.is_ready():
-            rows.append([btn("🔮 ဗေဒင်မေးရန်", "fx:m", "blue", emoji=False)])
-    except Exception:
-        log.exception("fortune button unavailable")
     return kb(rows)
 
 
@@ -90,13 +84,6 @@ def owner_only(fn):
 async def start(update, context):
     u = await ensure(update)
     m = update.message
-    if context.args and context.args[0] == "fx":
-        try:
-            import fortune
-            await fortune.open_menu(update, context)
-            return
-        except Exception:
-            log.exception("fortune deep link failed")
     markup = start_markup()
     photo = None
     try:
