@@ -6,6 +6,7 @@ Coin ကို bot ရဲ့ db.py (hold / settle / refund_hold) နဲ့ပဲ
 - Race ပြီးဆုံးတဲ့ history ကို DB ထဲ သိမ်း (/racecheck)
 
 main.py မှာ: module စာရင်းထဲ racing ကို economy ရှေ့ဆုံးမှာ ထည့်ပြီး racing.schedule(app) ကို ခေါ်ပါ။
+Premium emoji: owner က /setemoji နဲ့ ကိုယ်တိုင်ထည့်လို့ရတယ် (/emojis နဲ့ slot စာရင်းကြည့်)။
 """
 import asyncio
 import random
@@ -20,7 +21,7 @@ from telegram.error import BadRequest, TelegramError
 from telegram.ext import CallbackQueryHandler, CommandHandler, filters
 
 import db
-from common import btn, clear_timer, edit_msg, ensure, esc, fmt, kb, log, refund_holds, set_timer
+from common import OWNER_ID, btn, clear_timer, ensure, esc, fmt, kb, log, refund_holds, set_timer
 
 MMT = ZoneInfo("Asia/Yangon")
 
@@ -33,9 +34,18 @@ TRACK = 10                 # လမ်းကြောင်းအရှည်
 GAME = "race"              # holds table ထဲက game နာမည်
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-# assets/ folder ထဲမှာ ဖြစ်ဖြစ်၊ racing.py နဲ့ folder တူတူမှာ ဖြစ်ဖြစ် ရှာတွေ့ရင်သုံး
-BET_IMAGE = next((p for p in (os.path.join(_HERE, "assets", "race_bet.jpg"), os.path.join(_HERE, "race_bet.jpg"))
-                  if os.path.exists(p)), os.path.join(_HERE, "assets", "race_bet.jpg"))
+
+
+def _find(name):
+    """assets/ folder ထဲမှာ ဖြစ်ဖြစ်၊ racing.py နဲ့ folder တူတူမှာ ဖြစ်ဖြစ် ရှာတွေ့ရင်သုံး"""
+    for p in (os.path.join(_HERE, "assets", name), os.path.join(_HERE, name)):
+        if os.path.exists(p):
+            return p
+    return os.path.join(_HERE, "assets", name)
+
+
+GROUP_IMAGE = _find("race_group.jpg")     # /race နှိပ်ရင် group မှာ ပေါ်မယ့်ပုံ
+BET_IMAGE = _find("race_bet.jpg")         # private chat မှာ လောင်းကြေးရွေးတဲ့ ပုံ
 
 CARS = [
     ("🚙", "🔵", "BluebLion"),
@@ -45,11 +55,20 @@ CARS = [
     ("🚘", "⚫", "BlackDiamond"),
 ]
 
+# Premium emoji slot တွေ (default emoji က မူလပုံစံ)
+SLOTS = {
+    "flag": "🏁", "host": "👤", "people": "👥", "coin": "💰", "timer": "⏳", "trophy": "🏆",
+    "car1": "🚙", "car2": "🚗", "car3": "🏎️", "car4": "🚕", "car5": "🚘",
+    "color1": "🔵", "color2": "🟢", "color3": "🔴", "color4": "🟡", "color5": "⚫",
+}
+EMOJI = {}                            # slot -> custom_emoji_id (DB ကနေ load)
+
 _rng = random.SystemRandom()          # winner ကို OS randomness နဲ့ ရွေး
 RACES = {}                            # chat_id -> race (open / locked)
 BY_ID = {}                            # race id -> race
 PAYLOAD_RE = r"^/start(@\w+)?\s+race_\d+_[0-4]$"
 PAYLOAD = re.compile(r"^race_(\d+)_([0-4])$")
+TGEMOJI = re.compile(r'<tg-emoji emoji-id="\d+">(.*?)</tg-emoji>')
 
 with db.tx() as _c:
     _c.execute("""CREATE TABLE IF NOT EXISTS races(
@@ -57,16 +76,32 @@ with db.tx() as _c:
         creator_id INTEGER, state TEXT, winner INTEGER,
         players INTEGER DEFAULT 0, total INTEGER DEFAULT 0,
         created_at INTEGER, ended_at INTEGER)""")
+    _c.execute("CREATE TABLE IF NOT EXISTS race_emoji(slot TEXT PRIMARY KEY, emoji_id TEXT)")
+with db._lock:
+    for _slot, _eid in db._c.execute("SELECT slot,emoji_id FROM race_emoji").fetchall():
+        if _slot in SLOTS:
+            EMOJI[_slot] = _eid
 
 
-# ------------------------------------------------------------------ helpers
+# ------------------------------------------------------------------ emoji / text helpers
+def E(slot):
+    """slot ကို premium emoji ထည့်ထားရင် premium ပုံစံ၊ မထည့်ရင် ပုံမှန် emoji"""
+    eid = EMOJI.get(slot)
+    d = SLOTS[slot]
+    return f'<tg-emoji emoji-id="{eid}">{d}</tg-emoji>' if eid else d
+
+
+def plain(text):
+    """premium emoji tag တွေကို ပုံမှန် emoji ပြန်ပြောင်း (Telegram က လက်မခံရင် အစားထိုးပို့ဖို့)"""
+    return TGEMOJI.sub(r"\1", text)
+
+
 def k(n):
     return f"{n // 1000}k"
 
 
 def car_label(i):
-    ce, co, nm = CARS[i]
-    return f"{ce} {co} {nm}"
+    return f"{E(f'car{i + 1}')} {E(f'color{i + 1}')} {CARS[i][2]}"
 
 
 def green_url(text, url):
@@ -81,11 +116,13 @@ def group_text(r):
     for b in r["bets"].values():
         per[b["car"]] += 1
     total = sum(b["amt"] for b in r["bets"].values())
-    lines = [f"🏁 <b>PCREW CAR RACING</b> · Race #{r['id']}", f"👤 ဖွင့်သူ: {esc(r['cname'])}", "",
-             "ကားကို နှိပ်ပြီး Bot private chat မှာ လောင်းကြေးရွေးပါ 👇", ""]
-    lines += [f"{car_label(i)} — {per[i]} ယောက်" for i in range(len(CARS))]
-    lines += ["", f"👥 လောင်းသူ {len(r['bets'])} ယောက် · 💰 စုစုပေါင်း {fmt(total)} coin", "",
-              "⏳ ၂ မိနစ်အတွင်း ဖွင့်သူက START နှိပ်ပါ၊ မနှိပ်ရင် ပယ်ဖျက်ပြီး ပြန်အမ်းပါမယ်"]
+    lines = [f"{E('flag')}<b>PCREW CAR RACING</b>{E('flag')}",
+             f"{E('host')} open: {esc(r['cname'])}", ""]
+    lines += [f"{car_label(i)} — {per[i]}" for i in range(len(CARS))]
+    lines += ["", f"{E('people')} Total Bet {len(r['bets'])}",
+              f"{E('coin')} Total {fmt(total)} coin", "",
+              f"<blockquote>{E('timer')} ၂ မိနစ်အတွင်း ပွဲစသူက START နှိပ်ပါ၊ "
+              f"မနှိပ်ရင် ပွဲဖျက်ပြီးcoinပြန်အမ်းပါမယ်။</blockquote>"]
     return "\n".join(lines)
 
 
@@ -103,11 +140,11 @@ def group_kb(r, username):
 
 
 def panel_caption(rid, car, bal, amt):
-    t = (f"🏁 <b>PCREW CAR RACING</b> · Race #{rid}\n"
+    t = (f"{E('flag')} <b>PCREW CAR RACING</b> · Race #{rid}\n"
          f"{car_label(car)} ကို ရွေးထားပါတယ်\n"
-         f"💰 လက်ကျန်: {fmt(bal)} coin\n\nလောင်းကြေးရွေးပါ 👇")
+         f"{E('coin')} လက်ကျန်: {fmt(bal)} coin\n\nလောင်းကြေးရွေးပါ 👇")
     if amt:
-        t += f"\n\n✅ ရွေးထားတာ: {fmt(amt)} coin\n🏆 နိုင်ရင် {fmt(amt * PAYOUT_MULT)} ပြန်ရမယ်"
+        t += f"\n\n✅ ရွေးထားတာ: {fmt(amt)} coin\n{E('trophy')} နိုင်ရင် {fmt(amt * PAYOUT_MULT)} ပြန်ရမယ်"
     return t
 
 
@@ -131,10 +168,10 @@ def make_frames(winner):
 
 
 def track_text(rid, pos, note):
-    lines = [f"🏁 <b>PCREW CAR RACING</b> · Race #{rid}", note, ""]
-    for i, (ce, co, nm) in enumerate(CARS):
-        lines.append(f"{co} {nm}")
-        lines.append("·" * pos[i] + ce + "·" * (TRACK - pos[i]) + "🏁")
+    lines = [f"{E('flag')}<b>PCREW CAR RACING</b>{E('flag')} · Race #{rid}", note, ""]
+    for i, (_, co, nm) in enumerate(CARS):
+        lines.append(f"{E(f'color{i + 1}')} {nm}")
+        lines.append("·" * pos[i] + E(f"car{i + 1}") + "·" * (TRACK - pos[i]) + "🏁")
     return "\n".join(lines)
 
 
@@ -142,7 +179,7 @@ def result_text(r, paid=True):
     w = r["winner"]
     winners = [b for b in r["bets"].values() if b["car"] == w]
     total = sum(b["amt"] for b in r["bets"].values())
-    lines = [f"🏆 <b>Race #{r['id']} ပြီးဆုံးပါပြီ!</b>", "", f"🥇 {car_label(w)} နိုင်ပါတယ်!", ""]
+    lines = [f"{E('trophy')} <b>Race #{r['id']} ပြီးဆုံးပါပြီ!</b>", "", f"🥇 {car_label(w)} နိုင်ပါတယ်!", ""]
     if not paid:
         lines.append("⚠️ ဆုကြေးမပေးနိုင်ပါ၊ လောင်းကြေးတွေ ပြန်အမ်းပြီးသားဖြစ်နိုင်ပါတယ်")
     elif winners:
@@ -153,30 +190,58 @@ def result_text(r, paid=True):
             lines.append(f"... နောက်ထပ် {len(winners) - 10} ယောက်")
     else:
         lines.append("😅 နိုင်တဲ့ကားကို ဘယ်သူမှ မလောင်းထားပါ")
-    lines += ["", f"❌ ရှုံးသူ {len(r['bets']) - len(winners)} ယောက်", f"💰 စုစုပေါင်းလောင်းကြေး {fmt(total)}",
-              "", "🔁 /race နဲ့ ပွဲသစ်ဖွင့်ပါ"]
+    lines += ["", f"❌ ရှုံးသူ {len(r['bets']) - len(winners)} ယောက်",
+              f"{E('coin')} စုစုပေါင်းလောင်းကြေး {fmt(total)}", "", "🔁 /race နဲ့ ပွဲသစ်ဖွင့်ပါ"]
     return "\n".join(lines)
 
 
-_photo_id = None
+# ------------------------------------------------------------------ sending / editing
+_photo_ids = {}
 
 
-async def send_panel(bot, chat_id, caption, markup):
-    """လောင်းကြေးရွေးတဲ့ private message ကို ပုံနဲ့တွဲပို့ (ပထမတစ်ခါ upload၊ နောက်ဆို file_id)"""
-    global _photo_id
-    if _photo_id:
+async def send_img(bot, chat_id, key, path, caption, markup):
+    """ပုံနဲ့ caption တွဲပို့ (ပထမတစ်ခါ upload၊ နောက်ဆို file_id)။ premium emoji ကို Telegram က မလက်ခံရင် ပုံမှန် emoji နဲ့ ပြန်ပို့"""
+    last = None
+    for cap in dict.fromkeys((caption, plain(caption))):
         try:
-            return await bot.send_photo(chat_id, _photo_id, caption=caption, reply_markup=markup)
-        except BadRequest:
-            _photo_id = None
-    try:
-        with open(BET_IMAGE, "rb") as f:
-            m = await bot.send_photo(chat_id, f, caption=caption, reply_markup=markup)
-        _photo_id = m.photo[-1].file_id
-        return m
-    except FileNotFoundError:
-        log.error("race image not found: %s", BET_IMAGE)
-        return await bot.send_message(chat_id, caption, reply_markup=markup)
+            fid = _photo_ids.get(key)
+            if fid:
+                try:
+                    return await bot.send_photo(chat_id, fid, caption=cap, reply_markup=markup)
+                except BadRequest:
+                    _photo_ids.pop(key, None)
+            with open(path, "rb") as f:
+                m = await bot.send_photo(chat_id, f, caption=cap, reply_markup=markup)
+            _photo_ids[key] = m.photo[-1].file_id
+            return m
+        except FileNotFoundError:
+            log.error("race image not found: %s", path)
+            return await bot.send_message(chat_id, cap, reply_markup=markup)
+        except BadRequest as e:
+            last = e
+    raise last
+
+
+async def edit_cap(bot, chat, mid, text, markup=None):
+    """ပုံပါတဲ့ message ရဲ့ caption ကို edit (ပုံမပါတဲ့ message ဆိုရင် text edit)။ markup=None ဆို ခလုတ်ဖယ်"""
+    for t in dict.fromkeys((text, plain(text))):
+        for as_caption in (True, False):
+            try:
+                if as_caption:
+                    await bot.edit_message_caption(chat_id=chat, message_id=mid, caption=t, reply_markup=markup)
+                else:
+                    await bot.edit_message_text(t, chat_id=chat, message_id=mid, reply_markup=markup)
+                return
+            except BadRequest as e:
+                s = str(e).lower()
+                if "not modified" in s:
+                    return
+                if as_caption and "no caption" in s:
+                    continue            # ပုံမပါတဲ့ message၊ text နဲ့ ပြန်စမ်း
+                break                    # တခြားအမှား၊ ပုံမှန် emoji ဗားရှင်းနဲ့ ပြန်စမ်း
+            except Exception:
+                log.exception("race edit failed")
+                return
 
 
 async def edit_panel(q, text, markup=None):
@@ -186,7 +251,14 @@ async def edit_panel(q, text, markup=None):
         else:
             await q.edit_message_text(text, reply_markup=markup)
     except BadRequest:
-        pass
+        try:
+            plain_text = plain(text)
+            if q.message.photo:
+                await q.edit_message_caption(caption=plain_text, reply_markup=markup)
+            else:
+                await q.edit_message_text(plain_text, reply_markup=markup)
+        except BadRequest:
+            pass
 
 
 def finish(r, state):
@@ -220,7 +292,8 @@ async def race_cmd(update, context):
     RACES[chat.id] = r
     BY_ID[rid] = r
     try:
-        msg = await m.reply_text(group_text(r), reply_markup=group_kb(r, context.bot.username))
+        msg = await send_img(context.bot, chat.id, "group", GROUP_IMAGE, group_text(r),
+                             group_kb(r, context.bot.username))
     except Exception:
         finish(r, "cancelled")
         raise
@@ -241,7 +314,71 @@ async def racecheck_cmd(update, context):
     for rid, w, ts in rows:
         when = datetime.fromtimestamp(ts or 0, MMT).strftime("%d/%m %H:%M")
         lines.append(f"#{rid} · {car_label(w)} · {when}")
+    text = "\n".join(lines)
+    try:
+        await update.message.reply_text(text)
+    except BadRequest:
+        await update.message.reply_text(plain(text))
+
+
+# ------------------------------------------------------------------ owner: premium emoji
+async def setemoji_cmd(update, context):
+    """/setemoji flag host car1 ... + အဲဒီအစီအစဉ်အတိုင်း premium emoji တွေကို စာထဲရိုက် (သို့) premium emoji ပါတဲ့စာကို reply"""
+    if update.effective_user.id != OWNER_ID:
+        return
+    m = update.message
+    slots = [a.lower() for a in context.args if a.lower() in SLOTS]
+    ids = []
+    for msg in (m, m.reply_to_message):
+        if msg:
+            ents = sorted((e for e in (msg.entities or ()) if e.type == "custom_emoji"), key=lambda e: e.offset)
+            ids += [e.custom_emoji_id for e in ents]
+    if not slots:
+        await m.reply_text(
+            "အသုံးပြုပုံ:\n<code>/setemoji flag</code> ပြီး premium emoji ၁ ခုကို တစ်ခါတည်းရိုက်\n"
+            "ဥပမာ: <code>/setemoji flag host people</code> + premium emoji ၃ ခု (အစီအစဉ်အတိုင်း)\n"
+            "(သို့) premium emoji ပါတဲ့စာကို reply ထောက်ပြီး <code>/setemoji flag</code>\n\n"
+            "Slot စာရင်း: /emojis")
+        return
+    if len(ids) != len(slots):
+        await m.reply_text(f"⚠️ slot {len(slots)} ခုအတွက် premium emoji {len(ids)} ခုပဲ တွေ့တယ်၊ အရေအတွက်တူရမယ်")
+        return
+    with db.tx() as c:
+        for s, eid in zip(slots, ids):
+            c.execute("INSERT OR REPLACE INTO race_emoji(slot,emoji_id) VALUES(?,?)", (s, eid))
+    for s, eid in zip(slots, ids):
+        EMOJI[s] = eid
+    preview = " ".join(E(s) for s in slots)
+    try:
+        await m.reply_text(f"✅ သိမ်းပြီး: {', '.join(slots)}\n{preview}")
+    except BadRequest:
+        await m.reply_text(f"✅ သိမ်းပြီး: {', '.join(slots)}\n{plain(preview)}")
+
+
+async def emojis_cmd(update, context):
+    if update.effective_user.id != OWNER_ID:
+        return
+    lines = ["🎨 <b>Emoji slot များ</b>\n"]
+    for s, d in SLOTS.items():
+        lines.append(f"<code>{s}</code> {d} {'✅ premium ထည့်ပြီး' if s in EMOJI else ''}")
+    lines.append("\n/setemoji slot... ဖြင့်ထည့်၊ /resetemoji slot (သို့) /resetemoji all ဖြင့် မူလပြန်ထား")
     await update.message.reply_text("\n".join(lines))
+
+
+async def resetemoji_cmd(update, context):
+    if update.effective_user.id != OWNER_ID:
+        return
+    args = [a.lower() for a in context.args]
+    targets = list(EMOJI) if args == ["all"] else [a for a in args if a in SLOTS]
+    if not targets:
+        await update.message.reply_text("အသုံးပြုပုံ: <code>/resetemoji car1</code> (သို့) <code>/resetemoji all</code>")
+        return
+    with db.tx() as c:
+        for s in targets:
+            c.execute("DELETE FROM race_emoji WHERE slot=?", (s,))
+    for s in targets:
+        EMOJI.pop(s, None)
+    await update.message.reply_text(f"✅ မူလ emoji ပြန်ထားပြီး: {', '.join(targets) or '-'}")
 
 
 # ------------------------------------------------------------------ private: bet panel
@@ -264,8 +401,8 @@ async def race_start_cmd(update, context):
     if bal < BETS[0]:
         await msg.reply_text(f"❌ coin မလုံလောက်ပါ (အနည်းဆုံး {fmt(BETS[0])} လိုတယ်၊ လက်ကျန် {fmt(bal)})")
         return
-    await send_panel(context.bot, update.effective_chat.id, panel_caption(rid, car, bal, None),
-                     panel_kb(rid, car, None))
+    await send_img(context.bot, update.effective_chat.id, "bet", BET_IMAGE,
+                   panel_caption(rid, car, bal, None), panel_kb(rid, car, None))
 
 
 async def cb_amount(q, rid, car, amt):
@@ -301,8 +438,8 @@ async def cb_confirm(q, context, rid, car, amt):
         return
     r["bets"][u.id] = {"name": u.full_name, "car": car, "amt": amt, "hid": hid}
     await q.answer("✅ လောင်းပြီးပါပြီ!")
-    await edit_panel(q, (f"✅ <b>လောင်းကြေး တင်ပြီးပါပြီ!</b>\n\n🏁 Race #{rid}\n{car_label(car)}\n"
-                         f"💰 လောင်းကြေး: {fmt(amt)} coin\n🏆 နိုင်ရင်: {fmt(amt * PAYOUT_MULT)} coin\n"
+    await edit_panel(q, (f"✅ <b>လောင်းကြေး တင်ပြီးပါပြီ!</b>\n\n{E('flag')} Race #{rid}\n{car_label(car)}\n"
+                         f"{E('coin')} လောင်းကြေး: {fmt(amt)} coin\n{E('trophy')} နိုင်ရင်: {fmt(amt * PAYOUT_MULT)} coin\n"
                          f"💳 လက်ကျန်: {fmt(db.balance(u.id))} coin\n\nGroup ထဲမှာ ရလဒ်ကို စောင့်ကြည့်ပါ 🍀"))
     if not context.job_queue.get_jobs_by_name(f"rrf{rid}"):      # group message ကို ၁.၅ စက္ကန့်စုပြီး တစ်ခါပဲ edit
         context.job_queue.run_once(refresh_job, 1.5, name=f"rrf{rid}", data=rid)
@@ -358,10 +495,11 @@ async def cb_router(update, context):
 async def run_race(bot, r):
     rid, chat, mid, winner = r["id"], r["chat"], r["mid"], r["winner"]
     try:
-        await edit_msg(bot, chat, mid, f"🏁 <b>PCREW CAR RACING</b> · Race #{rid}\n\n🔒 လောင်းကြေးပိတ်ပါပြီ\n🚦 ပြင်ဆင်ပါ... ၃ ၂ ၁ ...")
+        await edit_cap(bot, chat, mid, f"{E('flag')}<b>PCREW CAR RACING</b>{E('flag')} · Race #{rid}\n\n"
+                                       f"🔒 လောင်းကြေးပိတ်ပါပြီ\n🚦 ပြင်ဆင်ပါ... ၃ ၂ ၁ ...")
         await asyncio.sleep(2)
         for frame in make_frames(winner):
-            await edit_msg(bot, chat, mid, track_text(rid, frame, "🔥 ပြိုင်ပွဲ ဖြစ်နေပါပြီ!"))
+            await edit_cap(bot, chat, mid, track_text(rid, frame, "🔥 ပြိုင်ပွဲ ဖြစ်နေပါပြီ!"))
             await asyncio.sleep(FRAME_DELAY)
     except Exception:
         log.exception("race animation failed")
@@ -374,7 +512,7 @@ async def run_race(bot, r):
     except Exception:
         log.exception("race settle failed")
     finish(r, "done" if paid else "cancelled")
-    await edit_msg(bot, chat, mid, result_text(r, paid))
+    await edit_cap(bot, chat, mid, result_text(r, paid))
 
 
 async def race_timeout(context):
@@ -386,7 +524,7 @@ async def race_timeout(context):
     refund_holds([b["hid"] for b in r["bets"].values()])
     n = len(r["bets"])
     finish(r, "cancelled")
-    await edit_msg(context.bot, r["chat"], r["mid"],
+    await edit_cap(context.bot, r["chat"], r["mid"],
                    f"⏱ Race #{rid} ကို ၂ မိနစ်အတွင်း START မနှိပ်လို့ ပယ်ဖျက်လိုက်ပါပြီ\n"
                    f"💸 လောင်းကြေး {n} ခုကို အကုန်ပြန်အမ်းပြီးပါပြီ\n\n🔁 /race နဲ့ ပွဲသစ်ဖွင့်ပါ")
 
@@ -394,7 +532,7 @@ async def race_timeout(context):
 async def refresh_job(context):
     r = BY_ID.get(context.job.data)
     if r and r["state"] == "open" and r["mid"]:
-        await edit_msg(context.bot, r["chat"], r["mid"], group_text(r), group_kb(r, context.bot.username))
+        await edit_cap(context.bot, r["chat"], r["mid"], group_text(r), group_kb(r, context.bot.username))
 
 
 async def recover_job(context):
@@ -407,7 +545,7 @@ async def recover_job(context):
         with db.tx() as c:
             c.execute("UPDATE races SET state='cancelled', ended_at=? WHERE id=?", (int(time.time()), rid))
         if mid:
-            await edit_msg(context.bot, chat, mid,
+            await edit_cap(context.bot, chat, mid,
                            f"⚠️ Bot restart ဖြစ်လို့ Race #{rid} ကို ပယ်ဖျက်ပြီး လောင်းကြေးအားလုံး ပြန်အမ်းပြီးပါပြီ")
 
 
@@ -420,5 +558,8 @@ def handlers():
         CommandHandler("start", race_start_cmd, filters=filters.ChatType.PRIVATE & filters.Regex(PAYLOAD_RE)),
         CommandHandler("race", race_cmd),
         CommandHandler("racecheck", racecheck_cmd),
+        CommandHandler("setemoji", setemoji_cmd),
+        CommandHandler("emojis", emojis_cmd),
+        CommandHandler("resetemoji", resetemoji_cmd),
         CallbackQueryHandler(cb_router, pattern=r"^rc:"),
     ]
