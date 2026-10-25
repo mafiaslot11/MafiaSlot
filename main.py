@@ -9,6 +9,7 @@ import db
 import economy
 import group
 import mafia
+import racing
 import welcome
 import solo
 
@@ -67,10 +68,12 @@ def main():
         .post_init(post_init)
         .build()
     )
-    for mod in (economy, solo, group, mafia, welcome):
+    # racing ကို economy ရှေ့မှာထားရမယ် (race ကားခလုတ်ကနေ ဝင်လာတဲ့ /start race_.. ကို economy ရဲ့ /start မတိုင်ခင် ဖမ်းဖို့)
+    for mod in (racing, economy, solo, group, mafia, welcome):
         for h in mod.handlers():
             app.add_handler(h)
     economy.schedule(app)
+    racing.schedule(app)
     app.add_error_handler(on_error)
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
