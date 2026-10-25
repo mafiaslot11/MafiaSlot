@@ -28,6 +28,7 @@ START_TEXT = (
     "Triple Dice🎲\n"
     "Bingo🎱\n"
     "Mafia🕵️\n"
+    "Race🏎️\n"
     "Lottery🏆</blockquote>\n"
     "<blockquote>Game Group join ပြီး Bonus Coin 300000 ယူပါ</blockquote>\n\n"
     "<i>ဆော့နည်းကို အောက်က Help Button ကိုနှိပ်ကြည့်ပါ 👇👇👇👇</i>"
