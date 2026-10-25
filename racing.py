@@ -18,7 +18,7 @@ from zoneinfo import ZoneInfo
 
 from telegram import InlineKeyboardButton
 from telegram.error import BadRequest, TelegramError
-from telegram.ext import CallbackQueryHandler, CommandHandler, filters
+from telegram.ext import CallbackQueryHandler, CommandHandler, MessageHandler, filters
 
 import db
 from common import OWNER_ID, btn, clear_timer, ensure, esc, fmt, kb, log, refund_holds, set_timer
@@ -355,14 +355,88 @@ async def setemoji_cmd(update, context):
         await m.reply_text(f"✅ သိမ်းပြီး: {', '.join(slots)}\n{plain(preview)}")
 
 
+WAIT = {}                  # owner id -> /emojis ပြီးနောက် ၁၀ မိနစ်အတွင်း emoji စာကို စောင့်နေချိန်
+WAIT_SECS = 600
+
+
+def _norm(x):
+    return x.replace("\ufe0f", "")
+
+
+def _u16(text, a, b):
+    """Telegram entity offset က UTF-16 unit နဲ့ပြောတာမို့ ဒီလိုဖြတ်ရတယ်"""
+    return text.encode("utf-16-le")[a * 2:b * 2].decode("utf-16-le", errors="ignore")
+
+
+DEFAULT_TO_SLOT = {_norm(d): s for s, d in SLOTS.items()}
+
+
+def slot_near(text, ent):
+    """premium emoji ရဲ့ ဘေးမှာ (အရင် သို့ နောက်) ရှိတဲ့ မူလ emoji က ဘယ် slot လဲ"""
+    total = len(text.encode("utf-16-le")) // 2
+    before = _norm(_u16(text, 0, ent.offset)).rstrip()
+    after = _norm(_u16(text, ent.offset + ent.length, total)).lstrip()
+    for d, s in DEFAULT_TO_SLOT.items():
+        if before.endswith(d):
+            return s
+    for d, s in DEFAULT_TO_SLOT.items():
+        if after.startswith(d):
+            return s
+    return None
+
+
+class EmojiReply(filters.MessageFilter):
+    """owner က /emojis ပြီးနောက် premium emoji ပါတဲ့ private စာပို့မှ ဖမ်းတယ် (တခြားစာတွေကို မထိဘူး)"""
+
+    def filter(self, message):
+        u = message.from_user
+        return bool(u and u.id == OWNER_ID and message.chat.type == "private"
+                    and WAIT.get(u.id, 0) > time.time()
+                    and any(e.type == "custom_emoji" for e in (message.entities or ())))
+
+
 async def emojis_cmd(update, context):
     if update.effective_user.id != OWNER_ID:
         return
-    lines = ["🎨 <b>Emoji slot များ</b>\n"]
-    for s, d in SLOTS.items():
-        lines.append(f"<code>{s}</code> {d} {'✅ premium ထည့်ပြီး' if s in EMOJI else ''}")
-    lines.append("\n/setemoji slot... ဖြင့်ထည့်၊ /resetemoji slot (သို့) /resetemoji all ဖြင့် မူလပြန်ထား")
+    WAIT[update.effective_user.id] = time.time() + WAIT_SECS
+    def row(slots):
+        return " ".join(f"{SLOTS[s]}{'✅' if s in EMOJI else ''}" for s in slots)
+    lines = ["🎨 <b>Bot ထဲက emoji များ</b>  (✅ = premium ထည့်ပြီး)\n",
+             f"{row(['flag', 'host', 'people', 'coin', 'timer', 'trophy'])}",
+             "   ခေါင်းစဉ် · ဖွင့်သူ · လောင်းသူ · coin · quote စာ · ရလဒ်\n",
+             f"ကား: {row(['car1', 'car2', 'car3', 'car4', 'car5'])}",
+             f"အရောင်: {row(['color1', 'color2', 'color3', 'color4', 'color5'])}\n",
+             "<b>ပြောင်းနည်း</b>: မကြိုက်တဲ့ emoji ရဲ့ <b>ဘေးမှာ</b> ကိုယ်ထားချင်တဲ့ premium emoji ကိုထည့်ပြီး "
+             "အခုပဲ ပို့လိုက်ပါ။ တစ်ခါတည်း အများကြီးလည်း ရတယ်။\n"
+             "ဥပမာ: <code>🏁⭐ 🚙🚀 🔵💙</code>  (⭐ 🚀 💙 နေရာမှာ premium emoji)\n\n"
+             "၁၀ မိနစ်အတွင်း စောင့်နေပါမယ်။ မူလပြန်ထားချင်ရင် /resetemoji all"]
     await update.message.reply_text("\n".join(lines))
+
+
+async def emoji_reply(update, context):
+    m = update.message
+    text = m.text or ""
+    done, bad = [], 0
+    for e in sorted((e for e in m.entities if e.type == "custom_emoji"), key=lambda e: e.offset):
+        slot = slot_near(text, e)
+        if not slot:
+            bad += 1
+            continue
+        with db.tx() as c:
+            c.execute("INSERT OR REPLACE INTO race_emoji(slot,emoji_id) VALUES(?,?)", (slot, e.custom_emoji_id))
+        EMOJI[slot] = e.custom_emoji_id
+        done.append(slot)
+    WAIT[m.from_user.id] = time.time() + WAIT_SECS
+    if not done:
+        await m.reply_text("⚠️ premium emoji ရဲ့ ဘေးမှာ ပြောင်းချင်တဲ့ မူလ emoji (🏁 🚙 🔵 ...) မတွေ့ပါ၊ /emojis ကိုကြည့်ပြီး ပြန်ပို့ပါ")
+        return
+    msg = f"✅ ပြောင်းပြီး {len(done)} ခု: " + " ".join(E(s) for s in done)
+    if bad:
+        msg += f"\n⚠️ {bad} ခုက မူလ emoji မတွေ့လို့ ကျော်ထားတယ်"
+    try:
+        await m.reply_text(msg)
+    except BadRequest:
+        await m.reply_text(plain(msg))
 
 
 async def resetemoji_cmd(update, context):
@@ -561,5 +635,6 @@ def handlers():
         CommandHandler("setemoji", setemoji_cmd),
         CommandHandler("emojis", emojis_cmd),
         CommandHandler("resetemoji", resetemoji_cmd),
+        MessageHandler(EmojiReply(), emoji_reply),
         CallbackQueryHandler(cb_router, pattern=r"^rc:"),
     ]
