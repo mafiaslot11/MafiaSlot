@@ -1,19 +1,21 @@
 """Group member management: /ban /mute /kick /unban /unmute
 
-- Group admin (Ban ခွင့်ရှိသူ) နဲ့ bot owner ပဲ သုံးလို့ရတယ်၊ တခြားသူကို ဘာကြောင့်မရလဲ ပြန်ပြောတယ်
+- Group admin ("Ban users" ခွင့်ရှိသူ) နဲ့ bot owner ပဲ သုံးလို့ရတယ်၊ တခြားသူကို ဘာကြောင့်မရလဲ ပြန်ပြောတယ်
 - Admin တွေနဲ့ owner ကို ban / mute / kick မလုပ်နိုင်ဘူး
 - Bot ကို Group မှာ Admin လုပ်ပြီး "Ban users" ခွင့်ပေးထားရမယ်
+- စာအားလုံး English + quote style၊ emoji တွေကို owner က /emojis နဲ့ premium ပြောင်းလို့ရတယ်
 """
 import re
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from telegram import ChatPermissions
-from telegram.error import TelegramError
+from telegram.error import BadRequest, TelegramError
 from telegram.ext import CallbackQueryHandler, CommandHandler, filters
 
 import db
-from common import OWNER_ID, btn, edit_msg, esc, kb, log, mention
+from common import OWNER_ID, btn, esc, kb, log, mention
+from emojis import E, plain, register as register_emojis
 
 MMT = ZoneInfo("Asia/Yangon")
 ANON_ADMIN_ID = 1087968824          # "Remain anonymous" admin ရဲ့ sender id
@@ -22,8 +24,70 @@ MIN_MUTE, MAX_MUTE = 60, 366 * 86400
 UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
 DUR_RE = re.compile(r"^(\d+)([smhdw]?)$", re.I)
 
+register_emojis("👮 Moderation", {
+    "mod_ban": "🔨", "mod_mute": "🔇", "mod_kick": "👢", "mod_unban": "🔓", "mod_unmute": "🔊",
+    "mod_user": "👤", "mod_by": "👮", "mod_reason": "📝", "mod_time": "⏱", "mod_until": "⏰",
+    "mod_perm": "🚫", "mod_back": "↩️", "mod_ok": "✅", "mod_no": "⛔", "mod_warn": "⚠️", "mod_fail": "❌",
+})
+
 with db.tx() as _c:
     _c.execute("CREATE TABLE IF NOT EXISTS mod_users(user_id INTEGER PRIMARY KEY, name TEXT, username TEXT)")
+
+
+# ------------------------------------------------------------------ text helpers
+def quote(*lines):
+    return "<blockquote>" + "\n".join(lines) + "</blockquote>"
+
+
+async def say(m, text, markup=None):
+    """premium emoji ကို Telegram က မလက်ခံရင် ပုံမှန် emoji နဲ့ ပြန်ပို့"""
+    try:
+        return await m.reply_text(text, reply_markup=markup)
+    except BadRequest:
+        return await m.reply_text(plain(text), reply_markup=markup)
+
+
+async def edit_text(bot, chat_id, mid, text):
+    for t in dict.fromkeys((text, plain(text))):
+        try:
+            await bot.edit_message_text(t, chat_id=chat_id, message_id=mid)
+            return
+        except BadRequest as e:
+            if "not modified" in str(e).lower():
+                return
+        except Exception:
+            log.exception("moderation edit failed")
+            return
+
+
+def why(status):
+    if status == "notadmin":
+        return quote(f"{E('mod_no')} Only group admins can use this command.")
+    if status == "norights":
+        return quote(f"{E('mod_no')} You're an admin, but you don't have the \"Ban users\" permission.",
+                     "Enable it in the group's admin settings.")
+    return quote(f"{E('mod_warn')} Couldn't check your admin status.",
+                 "Make sure the bot is an admin in this group.")
+
+
+def usage(action):
+    if action == "ban":
+        return quote(f"{E('mod_ban')} <b>/ban</b> – ban a member permanently",
+                     "Reply to a message with <code>/ban reason</code>",
+                     "or use <code>/ban @username</code> / <code>/ban user_id</code>")
+    if action == "mute":
+        return quote(f"{E('mod_mute')} <b>/mute</b> – temporarily stop a member from sending messages",
+                     "Reply to a message with <code>/mute 30m reason</code>",
+                     "Units: m = minutes, h = hours, d = days, w = weeks",
+                     "Default is 1 hour. <code>/mute @username 2h</code> works too.")
+    if action == "kick":
+        return quote(f"{E('mod_kick')} <b>/kick</b> – remove a member (they can rejoin)",
+                     "Reply to a message with <code>/kick</code> or use <code>/kick @username</code>")
+    if action == "unban":
+        return quote(f"{E('mod_unban')} <b>/unban</b> – let a banned member rejoin",
+                     "<code>/unban @username</code> or <code>/unban user_id</code>")
+    return quote(f"{E('mod_unmute')} <b>/unmute</b> – let a muted member send messages again",
+                 "Reply to a message with <code>/unmute</code> or use <code>/unmute @username</code>")
 
 
 # ------------------------------------------------------------------ helpers
@@ -56,10 +120,12 @@ def parse_duration(tok):
 
 
 def dur_text(secs):
-    for unit, name in ((86400, "ရက်"), (3600, "နာရီ"), (60, "မိနစ်")):
+    for unit, name in ((86400, "day"), (3600, "hour"), (60, "minute")):
         if secs >= unit and secs % unit == 0:
-            return f"{secs // unit} {name}"
-    return f"{max(1, secs // 60)} မိနစ်"
+            n = secs // unit
+            return f"{n} {name}{'s' if n != 1 else ''}"
+    n = max(1, secs // 60)
+    return f"{n} minute{'s' if n != 1 else ''}"
 
 
 def all_perms():
@@ -87,15 +153,7 @@ async def mod_status(bot, chat_id, uid):
 
 
 async def is_mod(bot, chat_id, uid):
-    """owner၊ Group creator၊ သို့ 'Ban users' ခွင့်ရှိတဲ့ admin"""
     return await mod_status(bot, chat_id, uid) == "ok"
-
-
-WHY = {
-    "notadmin": "⛔ ဒီ command ကို Group Admin ပဲ သုံးလို့ရပါတယ်",
-    "norights": "⛔ သင်က Admin ဖြစ်ပေမယ့် <b>Ban users</b> ခွင့် မရှိပါ၊ Group Admin settings မှာ ဖွင့်ပေးရမယ်",
-    "error": "⚠️ Admin ဟုတ်မဟုတ် စစ်လို့မရပါ၊ Bot ကို Group မှာ Admin လုပ်ထားလား စစ်ပါ",
-}
 
 
 async def is_protected(bot, chat_id, uid):
@@ -153,41 +211,52 @@ async def resolve(update, context):
     return None
 
 
-USAGE = {
-    "ban": "🔨 <b>/ban</b> – Group ကနေ အပြီးပိတ်ပင်\nစာကို reply ထောက်ပြီး <code>/ban အကြောင်းရင်း</code>\n(သို့) <code>/ban @username</code> / <code>/ban user_id</code>",
-    "mute": "🔇 <b>/mute</b> – စာပို့လို့မရအောင် ယာယီပိတ်\nစာကို reply ထောက်ပြီး <code>/mute 30m</code> (s မရှိ၊ m=မိနစ်၊ h=နာရီ၊ d=ရက်၊ w=ပတ်)\nအချိန်မပြောရင် ၁ နာရီ။ <code>/mute @username 2h အကြောင်းရင်း</code> လည်းရ",
-    "kick": "👢 <b>/kick</b> – Group ကနေ ထုတ်၊ ပြန်ဝင်လို့ရ\nစာကို reply ထောက်ပြီး <code>/kick</code> (သို့) <code>/kick @username</code>",
-    "unban": "🔓 <b>/unban</b> – Ban ဖြေ\n<code>/unban @username</code> (သို့) <code>/unban user_id</code>",
-    "unmute": "🔊 <b>/unmute</b> – Mute ဖြေ\nစာကို reply ထောက်ပြီး <code>/unmute</code> (သို့) <code>/unmute @username</code>",
-}
+def result_text(action, who, admin, secs=None, reason=""):
+    if action == "ban":
+        head, body = f"{E('mod_ban')} <b>BANNED</b>", [f"{E('mod_user')} User: {who}", f"{E('mod_perm')} Permanently banned from this group"]
+    elif action == "mute":
+        end = (datetime.now(MMT) + timedelta(seconds=secs)).strftime("%d/%m %H:%M")
+        head = f"{E('mod_mute')} <b>MUTED</b>"
+        body = [f"{E('mod_user')} User: {who}", f"{E('mod_time')} Duration: {dur_text(secs)}",
+                f"{E('mod_until')} Until: {end} (Myanmar time)"]
+    elif action == "kick":
+        head, body = f"{E('mod_kick')} <b>KICKED</b>", [f"{E('mod_user')} User: {who}", f"{E('mod_back')} Removed from the group, can rejoin"]
+    elif action == "unban":
+        head, body = f"{E('mod_unban')} <b>UNBANNED</b>", [f"{E('mod_user')} User: {who}", f"{E('mod_ok')} Can rejoin the group"]
+    else:
+        head, body = f"{E('mod_unmute')} <b>UNMUTED</b>", [f"{E('mod_user')} User: {who}", f"{E('mod_ok')} Can send messages again"]
+    body.append(f"{E('mod_by')} By: {admin}")
+    if reason:
+        body.append(f"{E('mod_reason')} Reason: {esc(reason)}")
+    return quote(head, *body)
 
 
 # ------------------------------------------------------------------ commands
 async def mod_cmd(update, context, action):
     m, chat, u = update.message, update.effective_chat, update.effective_user
     if chat.type not in ("group", "supergroup"):
-        await m.reply_text("⚠️ ဒီ command ကို Group ထဲမှာပဲ သုံးလို့ရပါတယ်")
+        await say(m, quote(f"{E('mod_warn')} This command only works in groups."))
         return
     anon = u.id == ANON_ADMIN_ID and m.sender_chat is not None and m.sender_chat.id == chat.id
     log.info("moderation /%s by %s in chat %s (anon=%s)", action, u.id, chat.id, anon)
     if not anon:
         status = await mod_status(context.bot, chat.id, u.id)
         if status != "ok":
-            await m.reply_text(WHY[status])
+            await say(m, why(status))
             return
     r = await resolve(update, context)
     if not r:
-        await m.reply_text(USAGE[action])
+        await say(m, usage(action))
         return
     uid, name, username, rest = r
     if not await bot_can_restrict(context.bot, chat.id):
-        await m.reply_text("⚠️ Bot ကို Group မှာ <b>Admin</b> လုပ်ပြီး <b>Ban users</b> ခွင့်ပေးထားမှ သုံးလို့ရမယ်")
+        await say(m, quote(f"{E('mod_warn')} Please make the bot an <b>Admin</b> with the \"Ban users\" permission first."))
         return
     if uid == u.id:
-        await m.reply_text("⚠️ ကိုယ့်ကိုယ်ကို မလုပ်နိုင်ပါ")
+        await say(m, quote(f"{E('mod_warn')} You can't do this to yourself."))
         return
     if action in ("ban", "mute", "kick") and await is_protected(context.bot, chat.id, uid):
-        await m.reply_text("⛔ Admin / Owner / Bot ကို အရေးယူလို့မရပါ")
+        await say(m, quote(f"{E('mod_no')} Can't take action on admins, the owner, or the bot."))
         return
 
     secs, until = None, None
@@ -204,29 +273,17 @@ async def mod_cmd(update, context, action):
         await perform(context.bot, chat.id, uid, action, until)
     except TelegramError as e:
         log.warning("moderation %s failed: %s", action, e)
-        await m.reply_text(f"❌ မအောင်မြင်ပါ: {esc(e.message if hasattr(e, 'message') else e)}")
+        await say(m, quote(f"{E('mod_fail')} Failed: {esc(getattr(e, 'message', e))}"))
         return
     remember(uid, name, username)
 
-    who = mention(uid, name)
     admin = "Admin" if anon else mention(u.id, u.full_name)
-    tail = f"\n👮 အရေးယူသူ: {admin}" + (f"\n📝 အကြောင်းရင်း: {esc(reason)}" if reason else "")
     markup = None
     if action == "ban":
-        text = f"🔨 {who} ကို Group ထဲကနေ <b>အပြီးပိတ်ပင်</b>လိုက်ပါပြီ" + tail
         markup = kb([[btn("🔓 Unban", f"mod:ub:{chat.id}:{uid}", "green", emoji=False)]])
     elif action == "mute":
-        end = (datetime.now(MMT) + timedelta(seconds=secs)).strftime("%d/%m %H:%M")
-        text = (f"🔇 {who} ကို <b>{dur_text(secs)}</b> စာပို့ခွင့်ပိတ်လိုက်ပါပြီ\n"
-                f"⏰ ပြန်ဖွင့်မယ့်အချိန်: {end} (မြန်မာစံတော်ချိန်)" + tail)
         markup = kb([[btn("🔊 Unmute", f"mod:um:{chat.id}:{uid}", "green", emoji=False)]])
-    elif action == "kick":
-        text = f"👢 {who} ကို Group ထဲကနေ <b>ထုတ်</b>လိုက်ပါပြီ (ပြန်ဝင်လို့ရပါတယ်)" + tail
-    elif action == "unban":
-        text = f"🔓 {who} ကို <b>Ban ဖြေ</b>လိုက်ပါပြီ၊ ပြန်ဝင်လို့ရပါပြီ" + tail
-    else:
-        text = f"🔊 {who} ကို စာပို့ခွင့် <b>ပြန်ပေး</b>လိုက်ပါပြီ" + tail
-    await m.reply_text(text, reply_markup=markup)
+    await say(m, result_text(action, mention(uid, name), admin, secs, reason), markup)
 
 
 async def ban_cmd(update, context):
@@ -259,21 +316,18 @@ async def mod_cb(update, context):
         await q.answer()
         return
     if not await is_mod(context.bot, chat_id, q.from_user.id):
-        await q.answer("⛔ Admin ပဲ နှိပ်လို့ရပါတယ်", show_alert=True)
+        await q.answer("⛔ Admins only", show_alert=True)
         return
     action = "unban" if act == "ub" else "unmute"
     try:
         await perform(context.bot, chat_id, uid, action)
     except TelegramError as e:
         log.warning("moderation button %s failed: %s", action, e)
-        await q.answer("❌ မအောင်မြင်ပါ", show_alert=True)
+        await q.answer("❌ Failed", show_alert=True)
         return
-    await q.answer("✅ ပြီးပါပြီ")
-    who = mention(uid, known_name(uid))
-    admin = mention(q.from_user.id, q.from_user.full_name)
-    text = (f"🔓 {who} ကို <b>Ban ဖြေ</b>လိုက်ပါပြီ၊ ပြန်ဝင်လို့ရပါပြီ" if action == "unban"
-            else f"🔊 {who} ကို စာပို့ခွင့် <b>ပြန်ပေး</b>လိုက်ပါပြီ") + f"\n👮 အရေးယူသူ: {admin}"
-    await edit_msg(context.bot, q.message.chat_id, q.message.message_id, text)
+    await q.answer("✅ Done")
+    text = result_text(action, mention(uid, known_name(uid)), mention(q.from_user.id, q.from_user.full_name))
+    await edit_text(context.bot, q.message.chat_id, q.message.message_id, text)
 
 
 def handlers():

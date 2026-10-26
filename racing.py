@@ -6,7 +6,7 @@ Coin ကို bot ရဲ့ db.py (hold / settle / refund_hold) နဲ့ပဲ
 - Race ပြီးဆုံးတဲ့ history ကို DB ထဲ သိမ်း (/racecheck)
 
 main.py မှာ: module စာရင်းထဲ racing ကို economy ရှေ့ဆုံးမှာ ထည့်ပြီး racing.schedule(app) ကို ခေါ်ပါ။
-Premium emoji: owner က /setemoji နဲ့ ကိုယ်တိုင်ထည့်လို့ရတယ် (/emojis နဲ့ slot စာရင်းကြည့်)။
+Premium emoji: emojis.py (owner က /emojis နဲ့ ကိုယ်တိုင်ပြောင်းလို့ရ)။ main.py မှာ emojis module ကိုလည်း ထည့်ရမယ်။
 """
 import asyncio
 import random
@@ -18,10 +18,11 @@ from zoneinfo import ZoneInfo
 
 from telegram import InlineKeyboardButton
 from telegram.error import BadRequest, TelegramError
-from telegram.ext import CallbackQueryHandler, CommandHandler, MessageHandler, filters
+from telegram.ext import CallbackQueryHandler, CommandHandler, filters
 
 import db
-from common import OWNER_ID, btn, clear_timer, ensure, esc, fmt, kb, log, refund_holds, set_timer
+from common import btn, clear_timer, ensure, esc, fmt, kb, log, refund_holds, set_timer
+from emojis import E, plain, register as register_emojis
 
 MMT = ZoneInfo("Asia/Yangon")
 
@@ -55,20 +56,17 @@ CARS = [
     ("🚘", "⚫", "BlackDiamond"),
 ]
 
-# Premium emoji slot တွေ (default emoji က မူလပုံစံ)
-SLOTS = {
+register_emojis("🏁 Racing", {
     "flag": "🏁", "host": "👤", "people": "👥", "coin": "💰", "timer": "⏳", "trophy": "🏆",
     "car1": "🚙", "car2": "🚗", "car3": "🏎️", "car4": "🚕", "car5": "🚘",
     "color1": "🔵", "color2": "🟢", "color3": "🔴", "color4": "🟡", "color5": "⚫",
-}
-EMOJI = {}                            # slot -> custom_emoji_id (DB ကနေ load)
+})
 
 _rng = random.SystemRandom()          # winner ကို OS randomness နဲ့ ရွေး
 RACES = {}                            # chat_id -> race (open / locked)
 BY_ID = {}                            # race id -> race
 PAYLOAD_RE = r"^/start(@\w+)?\s+race_\d+_[0-4]$"
 PAYLOAD = re.compile(r"^race_(\d+)_([0-4])$")
-TGEMOJI = re.compile(r'<tg-emoji emoji-id="\d+">(.*?)</tg-emoji>')
 
 with db.tx() as _c:
     _c.execute("""CREATE TABLE IF NOT EXISTS races(
@@ -76,26 +74,9 @@ with db.tx() as _c:
         creator_id INTEGER, state TEXT, winner INTEGER,
         players INTEGER DEFAULT 0, total INTEGER DEFAULT 0,
         created_at INTEGER, ended_at INTEGER)""")
-    _c.execute("CREATE TABLE IF NOT EXISTS race_emoji(slot TEXT PRIMARY KEY, emoji_id TEXT)")
-with db._lock:
-    for _slot, _eid in db._c.execute("SELECT slot,emoji_id FROM race_emoji").fetchall():
-        if _slot in SLOTS:
-            EMOJI[_slot] = _eid
 
 
 # ------------------------------------------------------------------ emoji / text helpers
-def E(slot):
-    """slot ကို premium emoji ထည့်ထားရင် premium ပုံစံ၊ မထည့်ရင် ပုံမှန် emoji"""
-    eid = EMOJI.get(slot)
-    d = SLOTS[slot]
-    return f'<tg-emoji emoji-id="{eid}">{d}</tg-emoji>' if eid else d
-
-
-def plain(text):
-    """premium emoji tag တွေကို ပုံမှန် emoji ပြန်ပြောင်း (Telegram က လက်မခံရင် အစားထိုးပို့ဖို့)"""
-    return TGEMOJI.sub(r"\1", text)
-
-
 def k(n):
     return f"{n // 1000}k"
 
@@ -321,140 +302,6 @@ async def racecheck_cmd(update, context):
         await update.message.reply_text(plain(text))
 
 
-# ------------------------------------------------------------------ owner: premium emoji
-async def setemoji_cmd(update, context):
-    """/setemoji flag host car1 ... + အဲဒီအစီအစဉ်အတိုင်း premium emoji တွေကို စာထဲရိုက် (သို့) premium emoji ပါတဲ့စာကို reply"""
-    if update.effective_user.id != OWNER_ID:
-        return
-    m = update.message
-    slots = [a.lower() for a in context.args if a.lower() in SLOTS]
-    ids = []
-    for msg in (m, m.reply_to_message):
-        if msg:
-            ents = sorted((e for e in (msg.entities or ()) if e.type == "custom_emoji"), key=lambda e: e.offset)
-            ids += [e.custom_emoji_id for e in ents]
-    if not slots:
-        await m.reply_text(
-            "အသုံးပြုပုံ:\n<code>/setemoji flag</code> ပြီး premium emoji ၁ ခုကို တစ်ခါတည်းရိုက်\n"
-            "ဥပမာ: <code>/setemoji flag host people</code> + premium emoji ၃ ခု (အစီအစဉ်အတိုင်း)\n"
-            "(သို့) premium emoji ပါတဲ့စာကို reply ထောက်ပြီး <code>/setemoji flag</code>\n\n"
-            "Slot စာရင်း: /emojis")
-        return
-    if len(ids) != len(slots):
-        await m.reply_text(f"⚠️ slot {len(slots)} ခုအတွက် premium emoji {len(ids)} ခုပဲ တွေ့တယ်၊ အရေအတွက်တူရမယ်")
-        return
-    with db.tx() as c:
-        for s, eid in zip(slots, ids):
-            c.execute("INSERT OR REPLACE INTO race_emoji(slot,emoji_id) VALUES(?,?)", (s, eid))
-    for s, eid in zip(slots, ids):
-        EMOJI[s] = eid
-    preview = " ".join(E(s) for s in slots)
-    try:
-        await m.reply_text(f"✅ သိမ်းပြီး: {', '.join(slots)}\n{preview}")
-    except BadRequest:
-        await m.reply_text(f"✅ သိမ်းပြီး: {', '.join(slots)}\n{plain(preview)}")
-
-
-WAIT = {}                  # owner id -> /emojis ပြီးနောက် ၁၀ မိနစ်အတွင်း emoji စာကို စောင့်နေချိန်
-WAIT_SECS = 600
-
-
-def _norm(x):
-    return x.replace("\ufe0f", "")
-
-
-def _u16(text, a, b):
-    """Telegram entity offset က UTF-16 unit နဲ့ပြောတာမို့ ဒီလိုဖြတ်ရတယ်"""
-    return text.encode("utf-16-le")[a * 2:b * 2].decode("utf-16-le", errors="ignore")
-
-
-DEFAULT_TO_SLOT = {_norm(d): s for s, d in SLOTS.items()}
-
-
-def slot_near(text, ent):
-    """premium emoji ရဲ့ ဘေးမှာ (အရင် သို့ နောက်) ရှိတဲ့ မူလ emoji က ဘယ် slot လဲ"""
-    total = len(text.encode("utf-16-le")) // 2
-    before = _norm(_u16(text, 0, ent.offset)).rstrip()
-    after = _norm(_u16(text, ent.offset + ent.length, total)).lstrip()
-    for d, s in DEFAULT_TO_SLOT.items():
-        if before.endswith(d):
-            return s
-    for d, s in DEFAULT_TO_SLOT.items():
-        if after.startswith(d):
-            return s
-    return None
-
-
-class EmojiReply(filters.MessageFilter):
-    """owner က /emojis ပြီးနောက် premium emoji ပါတဲ့ private စာပို့မှ ဖမ်းတယ် (တခြားစာတွေကို မထိဘူး)"""
-
-    def filter(self, message):
-        u = message.from_user
-        return bool(u and u.id == OWNER_ID and message.chat.type == "private"
-                    and WAIT.get(u.id, 0) > time.time()
-                    and any(e.type == "custom_emoji" for e in (message.entities or ())))
-
-
-async def emojis_cmd(update, context):
-    if update.effective_user.id != OWNER_ID:
-        return
-    WAIT[update.effective_user.id] = time.time() + WAIT_SECS
-    def row(slots):
-        return " ".join(f"{SLOTS[s]}{'✅' if s in EMOJI else ''}" for s in slots)
-    lines = ["🎨 <b>Bot ထဲက emoji များ</b>  (✅ = premium ထည့်ပြီး)\n",
-             f"{row(['flag', 'host', 'people', 'coin', 'timer', 'trophy'])}",
-             "   ခေါင်းစဉ် · ဖွင့်သူ · လောင်းသူ · coin · quote စာ · ရလဒ်\n",
-             f"ကား: {row(['car1', 'car2', 'car3', 'car4', 'car5'])}",
-             f"အရောင်: {row(['color1', 'color2', 'color3', 'color4', 'color5'])}\n",
-             "<b>ပြောင်းနည်း</b>: မကြိုက်တဲ့ emoji ရဲ့ <b>ဘေးမှာ</b> ကိုယ်ထားချင်တဲ့ premium emoji ကိုထည့်ပြီး "
-             "အခုပဲ ပို့လိုက်ပါ။ တစ်ခါတည်း အများကြီးလည်း ရတယ်။\n"
-             "ဥပမာ: <code>🏁⭐ 🚙🚀 🔵💙</code>  (⭐ 🚀 💙 နေရာမှာ premium emoji)\n\n"
-             "၁၀ မိနစ်အတွင်း စောင့်နေပါမယ်။ မူလပြန်ထားချင်ရင် /resetemoji all"]
-    await update.message.reply_text("\n".join(lines))
-
-
-async def emoji_reply(update, context):
-    m = update.message
-    text = m.text or ""
-    done, bad = [], 0
-    for e in sorted((e for e in m.entities if e.type == "custom_emoji"), key=lambda e: e.offset):
-        slot = slot_near(text, e)
-        if not slot:
-            bad += 1
-            continue
-        with db.tx() as c:
-            c.execute("INSERT OR REPLACE INTO race_emoji(slot,emoji_id) VALUES(?,?)", (slot, e.custom_emoji_id))
-        EMOJI[slot] = e.custom_emoji_id
-        done.append(slot)
-    WAIT[m.from_user.id] = time.time() + WAIT_SECS
-    if not done:
-        await m.reply_text("⚠️ premium emoji ရဲ့ ဘေးမှာ ပြောင်းချင်တဲ့ မူလ emoji (🏁 🚙 🔵 ...) မတွေ့ပါ၊ /emojis ကိုကြည့်ပြီး ပြန်ပို့ပါ")
-        return
-    msg = f"✅ ပြောင်းပြီး {len(done)} ခု: " + " ".join(E(s) for s in done)
-    if bad:
-        msg += f"\n⚠️ {bad} ခုက မူလ emoji မတွေ့လို့ ကျော်ထားတယ်"
-    try:
-        await m.reply_text(msg)
-    except BadRequest:
-        await m.reply_text(plain(msg))
-
-
-async def resetemoji_cmd(update, context):
-    if update.effective_user.id != OWNER_ID:
-        return
-    args = [a.lower() for a in context.args]
-    targets = list(EMOJI) if args == ["all"] else [a for a in args if a in SLOTS]
-    if not targets:
-        await update.message.reply_text("အသုံးပြုပုံ: <code>/resetemoji car1</code> (သို့) <code>/resetemoji all</code>")
-        return
-    with db.tx() as c:
-        for s in targets:
-            c.execute("DELETE FROM race_emoji WHERE slot=?", (s,))
-    for s in targets:
-        EMOJI.pop(s, None)
-    await update.message.reply_text(f"✅ မူလ emoji ပြန်ထားပြီး: {', '.join(targets) or '-'}")
-
-
 # ------------------------------------------------------------------ private: bet panel
 async def race_start_cmd(update, context):
     """group ထဲက ကားခလုတ်ကနေ ဝင်လာတဲ့ /start race_ID_CAR"""
@@ -632,9 +479,5 @@ def handlers():
         CommandHandler("start", race_start_cmd, filters=filters.ChatType.PRIVATE & filters.Regex(PAYLOAD_RE)),
         CommandHandler("race", race_cmd),
         CommandHandler("racecheck", racecheck_cmd),
-        CommandHandler("setemoji", setemoji_cmd),
-        CommandHandler("emojis", emojis_cmd),
-        CommandHandler("resetemoji", resetemoji_cmd),
-        MessageHandler(EmojiReply(), emoji_reply),
         CallbackQueryHandler(cb_router, pattern=r"^rc:"),
     ]
