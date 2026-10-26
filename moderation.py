@@ -1,6 +1,6 @@
 """Group member management: /ban /mute /kick /unban /unmute
 
-- Group admin (Ban ခွင့်ရှိသူ) နဲ့ bot owner ပဲ သုံးလို့ရတယ်၊ တခြားသူတွေရဲ့ command ကို ဘာမှမပြန်ဘူး
+- Group admin (Ban ခွင့်ရှိသူ) နဲ့ bot owner ပဲ သုံးလို့ရတယ်၊ တခြားသူကို ဘာကြောင့်မရလဲ ပြန်ပြောတယ်
 - Admin တွေနဲ့ owner ကို ban / mute / kick မလုပ်နိုင်ဘူး
 - Bot ကို Group မှာ Admin လုပ်ပြီး "Ban users" ခွင့်ပေးထားရမယ်
 """
@@ -70,17 +70,32 @@ def all_perms():
                            can_add_web_page_previews=True, can_invite_users=True)
 
 
-async def is_mod(bot, chat_id, uid):
-    """owner၊ Group creator၊ သို့ 'Ban users' ခွင့်ရှိတဲ့ admin"""
+async def mod_status(bot, chat_id, uid):
+    """'ok' | 'notadmin' | 'norights' | 'error'"""
     if uid == OWNER_ID:
-        return True
+        return "ok"
     try:
         mem = await bot.get_chat_member(chat_id, uid)
-    except TelegramError:
-        return False
+    except TelegramError as e:
+        log.warning("moderation: get_chat_member failed: %s", e)
+        return "error"
     if mem.status == "creator":
-        return True
-    return mem.status == "administrator" and bool(getattr(mem, "can_restrict_members", False))
+        return "ok"
+    if mem.status == "administrator":
+        return "ok" if getattr(mem, "can_restrict_members", False) else "norights"
+    return "notadmin"
+
+
+async def is_mod(bot, chat_id, uid):
+    """owner၊ Group creator၊ သို့ 'Ban users' ခွင့်ရှိတဲ့ admin"""
+    return await mod_status(bot, chat_id, uid) == "ok"
+
+
+WHY = {
+    "notadmin": "⛔ ဒီ command ကို Group Admin ပဲ သုံးလို့ရပါတယ်",
+    "norights": "⛔ သင်က Admin ဖြစ်ပေမယ့် <b>Ban users</b> ခွင့် မရှိပါ၊ Group Admin settings မှာ ဖွင့်ပေးရမယ်",
+    "error": "⚠️ Admin ဟုတ်မဟုတ် စစ်လို့မရပါ၊ Bot ကို Group မှာ Admin လုပ်ထားလား စစ်ပါ",
+}
 
 
 async def is_protected(bot, chat_id, uid):
@@ -154,8 +169,12 @@ async def mod_cmd(update, context, action):
         await m.reply_text("⚠️ ဒီ command ကို Group ထဲမှာပဲ သုံးလို့ရပါတယ်")
         return
     anon = u.id == ANON_ADMIN_ID and m.sender_chat is not None and m.sender_chat.id == chat.id
-    if not (anon or await is_mod(context.bot, chat.id, u.id)):
-        return                                              # admin မဟုတ်ရင် ဘာမှမပြန်ဘူး
+    log.info("moderation /%s by %s in chat %s (anon=%s)", action, u.id, chat.id, anon)
+    if not anon:
+        status = await mod_status(context.bot, chat.id, u.id)
+        if status != "ok":
+            await m.reply_text(WHY[status])
+            return
     r = await resolve(update, context)
     if not r:
         await m.reply_text(USAGE[action])
