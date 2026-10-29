@@ -75,7 +75,8 @@ def main():
         for h in mod.handlers():
             app.add_handler(h)
     economy.schedule(app)
-    racing.schedule(app)
+    racing.schedule(app) 
+    moderation.schedule(app)
     app.add_error_handler(on_error)
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
